@@ -3,9 +3,13 @@ package main
 import (
 	"fmt"
 	"github.com/gorilla/websocket"
+	"io"
+
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -44,6 +48,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Client connected:", connId)
 
 	var configReceived, ssmlReceived bool
+	var text string
 
 	for {
 		_, msg, err := ws.ReadMessage()
@@ -55,28 +60,90 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		msgStr := string(msg)
 		if strings.Contains(msgStr, "Path: speech.config") {
 			configReceived = true
-			fmt.Println("Received config")
+			log.Println("Received config")
 		} else if strings.Contains(msgStr, "Path: ssml") {
 			ssmlReceived = true
-			fmt.Println("Received SSML")
+			log.Println("Received SSML")
+
+			// Extract text from SSML (you may want to parse XML here; simplified example)
+			start := strings.Index(msgStr, "<prosody")
+			end := strings.Index(msgStr, "</prosody>")
+			if start != -1 && end != -1 && end > start {
+				text = msgStr[start:end]
+				// Simplify extraction to inside <prosody> ... </prosody>
+				text = strings.TrimSpace(text[strings.Index(text, ">")+1:])
+				log.Println("Extracted text to synth:", text)
+			}
 		}
 		print(msgStr)
 
-		data, err := os.ReadFile("dummy.mp3")
-		if err != nil {
-			log.Println("Failed to read dummy MP3:", err)
-			return
-		}
-		dummyMP3Bytes := data
-
 		if configReceived && ssmlReceived {
+			// Fetch wav
+			wavURL := "http://127.0.0.1:5000/api/text-to-speech?text=" + url.QueryEscape(text) + "&voice=en_US-ryan-high&speaker=en_US-ryan-high"
+			resp, err := http.Get(wavURL)
+			if err != nil {
+				log.Println("Error calling TTS API:", err)
+				break
+			}
+			wavData, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				log.Println("Error reading TTS response:", err)
+				break
+			}
+
+			// Convert wav to mp3
+			mp3Data, err := wavToMP3(wavData)
+			if err != nil {
+				log.Println("Error converting WAV to MP3:", err)
+				break
+			}
+
 			reqID := "some-random-or-extracted-request-id"
 			sendTurnStart(ws, websocket.TextMessage, reqID)
-			sendAudio(ws, dummyMP3Bytes, reqID)
+			sendAudio(ws, mp3Data, reqID)
 			sendTurnEnd(ws, websocket.TextMessage, reqID)
 			break
 		}
 	}
+}
+
+func wavToMP3(wavData []byte) ([]byte, error) {
+	// Write wav to temp file
+	tmpWav, err := os.CreateTemp("", "input-*.wav")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmpWav.Name())
+
+	_, err = tmpWav.Write(wavData)
+	tmpWav.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create temp file for mp3 output
+	tmpMP3, err := os.CreateTemp("", "output-*.mp3")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmpMP3.Name())
+	tmpMP3.Close()
+
+	// Run ffmpeg conversion
+	cmd := exec.Command("ffmpeg", "-y", "-i", tmpWav.Name(), "-codec:a", "libmp3lame", "-qscale:a", "2", tmpMP3.Name())
+	err = cmd.Run()
+	if err != nil {
+		return nil, err
+	}
+
+	// Read MP3 bytes
+	mp3Data, err := os.ReadFile(tmpMP3.Name())
+	if err != nil {
+		return nil, err
+	}
+
+	return mp3Data, nil
 }
 
 func sendTurnStart(ws *websocket.Conn, msgType int, reqID string) error {
