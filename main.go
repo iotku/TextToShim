@@ -44,7 +44,7 @@ var upgrader = websocket.Upgrader{
 func main() {
 	http.HandleFunc("/consumer/speech/synthesize/readaloud/edge/v1", handleWS)
 
-	fmt.Println("Server started on ws://localhost:8080")
+	fmt.Println("Server started on wss://localhost:443")
 	err := http.ListenAndServeTLS(":443", "speech.platform.bing.com.pem", "speech.platform.bing.com-key.pem", nil)
 	if err != nil {
 		log.Fatal("ListenAndServeTLS error:", err)
@@ -59,7 +59,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Println("Upgrade error:", err)
 		return
 	}
-	defer ws.Close()
+	defer logIfErr(ws.Close())
 
 	fmt.Println("Client connected:", connId)
 
@@ -90,11 +90,12 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			text = strings.TrimSpace(speak.Voice.Prosody.Text)
 			fmt.Println("Text:", text)
 		}
+
 		// Print message
 		//print(msgStr)
 		//print(text)
+
 		if configReceived && ssmlReceived {
-			// TODO: Break out to configurable URL API
 			wavURL := ApiUrl + url.QueryEscape(text)
 			resp, err := http.Get(wavURL)
 			if err != nil {
@@ -102,7 +103,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			wavData, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			logIfErr(resp.Body.Close())
 			if err != nil {
 				log.Println("Error reading TTS response:", err)
 				break
@@ -122,9 +123,10 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 
 			reqID := "some-random-or-extracted-request-id" // TODO: This doesn't really matter
-			sendTurnStart(ws, websocket.TextMessage, reqID)
-			sendAudio(ws, mp3Data, reqID)
-			sendTurnEnd(ws, websocket.TextMessage, reqID)
+			// Construct websocket response with audio data
+			logIfErr(sendTurnStart(ws, websocket.TextMessage, reqID))
+			logIfErr(sendAudio(ws, mp3Data, reqID))
+			logIfErr(sendTurnEnd(ws, websocket.TextMessage, reqID))
 			break
 		}
 	}
@@ -141,21 +143,21 @@ func wavToMP3(wavData []byte, speed float64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpWav.Name())
+	defer logIfErr(os.Remove(tmpWav.Name()))
 
 	_, err = tmpWav.Write(wavData)
-	tmpWav.Close()
+	logIfErr(tmpWav.Close())
 	if err != nil {
 		return nil, err
 	}
 
-	// Create temp file for mp3 output
+	// Create temp file for mp3 output // TODO: just do this in memory
 	tmpMP3, err := os.CreateTemp("", "output-*.mp3")
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpMP3.Name())
-	tmpMP3.Close()
+	defer logIfErr(os.Remove(tmpMP3.Name()))
+	logIfErr(tmpMP3.Close())
 
 	// Run ffmpeg conversion and set speed
 	cmd := exec.Command("ffmpeg", "-y", "-i", tmpWav.Name(), "-filter:a", filter, "-codec:a", "libmp3lame", "-qscale:a", "2", tmpMP3.Name())
@@ -202,4 +204,10 @@ func sendTurnEnd(ws *websocket.Conn, msgType int, reqID string) error {
 		"Path: turn.end\r\nX-RequestId: %s\r\nX-Timestamp: %s\r\n\r\n{}",
 		reqID, time.Now().Format(time.RFC1123))
 	return ws.WriteMessage(msgType, []byte(msg))
+}
+
+func logIfErr(err error) {
+	if err != nil {
+		log.Println("Error:", err)
+	}
 }
