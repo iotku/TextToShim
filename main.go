@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"github.com/gorilla/websocket"
@@ -10,13 +11,12 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
 
-const ApiUrl = "http://10.0.0.218:5000/api/text-to-speech?text=" // voice=en_US-lessac-high
+const ApiUrl = "http://localhost:5000/api/text-to-speech?text=" // voice=en_US-lessac-high
 
 type Speak struct {
 	XMLName xml.Name `xml:"speak"`
@@ -60,7 +60,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func(ws *websocket.Conn) {
-		logIfErr(ws.Close())
+		logIfErr(ws.Close(), "Close websocket connection")
 	}(ws)
 
 	fmt.Println("Client connected:", connId)
@@ -105,7 +105,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			wavData, err := io.ReadAll(resp.Body)
-			logIfErr(resp.Body.Close())
+			logIfErr(resp.Body.Close(), "TTS Response Body Close")
 			if err != nil {
 				log.Println("Error reading TTS response:", err)
 				break
@@ -126,9 +126,9 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 
 			reqID := "some-random-or-extracted-request-id" // TODO: This doesn't really matter
 			// Construct websocket response with audio data
-			logIfErr(sendTurnStart(ws, websocket.TextMessage, reqID))
-			logIfErr(sendAudio(ws, mp3Data, reqID))
-			logIfErr(sendTurnEnd(ws, websocket.TextMessage, reqID))
+			logIfErr(sendTurnStart(ws, websocket.TextMessage, reqID), "sendTurnStart")
+			logIfErr(sendAudio(ws, mp3Data, reqID), "sendAudio")
+			logIfErr(sendTurnEnd(ws, websocket.TextMessage, reqID), "sendTurnEnd")
 			break
 		}
 	}
@@ -140,43 +140,38 @@ func wavToMP3(wavData []byte, speed float64) ([]byte, error) {
 	} else if speed > 2.0 { // TODO: I think the scale goes up to 3.0, but my CPU can't keep up with that...
 		speed = 2.0
 	}
-	filter := fmt.Sprintf("atempo=%.2f", speed)
-	tmpWav, err := os.CreateTemp("", "input-*.wav")
-	if err != nil {
-		return nil, err
-	}
-	defer func(name string) {
-		logIfErr(os.Remove(name))
-	}(tmpWav.Name())
+	filter := fmt.Sprintf("atempo=%.2f", speed) // TODO: Verify atempo max value is 2.0, could chain filter
 
-	_, err = tmpWav.Write(wavData)
-	logIfErr(tmpWav.Close())
-	if err != nil {
-		return nil, err
-	}
+	// Run ffmpeg conversion and set speed, pipe:0 (stdin) as input, pipe:1 (stdout) as output
+	cmd := exec.Command("ffmpeg", "-y", "-f", "wav", "-i", "pipe:0", "-filter:a", filter, "-codec:a", "libmp3lame", "-qscale:a", "2", "-f", "mp3", "pipe:1")
+	stdin, err := cmd.StdinPipe()
+	logIfErr(err, "FFmpeg StdinPipe")
+	stdout, err := cmd.StdoutPipe()
+	logIfErr(err, "FFmpeg StdoutPipe")
 
-	// Create temp file for mp3 output // TODO: just do this in memory
-	tmpMP3, err := os.CreateTemp("", "output-*.mp3")
-	if err != nil {
-		return nil, err
-	}
-	defer func(name string) {
-		logIfErr(os.Remove(name))
-	}(tmpMP3.Name())
-	logIfErr(tmpMP3.Close())
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 
-	// Run ffmpeg conversion and set speed
-	cmd := exec.Command("ffmpeg", "-y", "-i", tmpWav.Name(), "-filter:a", filter, "-codec:a", "libmp3lame", "-qscale:a", "2", tmpMP3.Name())
-	err = cmd.Run()
-	if err != nil {
-		return nil, err
-	}
+	err = cmd.Start()
+	logIfErr(err, "FFmpeg Start")
 
-	mp3Data, err := os.ReadFile(tmpMP3.Name())
-	if err != nil {
-		return nil, err
-	}
+	// Write WAV to stdin
+	go func() { // don't risk blocking the main thread
+		defer func(stdin io.WriteCloser) {
+			logIfErr(stdin.Close(), "FFMpeg Close stdin")
+		}(stdin)
+		_, _ = stdin.Write(wavData)
+	}()
 
+	// Read MP3 from stdout
+	mp3Data, err := io.ReadAll(stdout)
+	logIfErr(err, "Failed to read MP3 data")
+
+	// Wait for the FFmpeg process to finish
+	err = cmd.Wait()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg failed: %w\nstderr: %s", err, stderr.String())
+	}
 	return mp3Data, nil
 }
 
@@ -212,8 +207,8 @@ func sendTurnEnd(ws *websocket.Conn, msgType int, reqID string) error {
 	return ws.WriteMessage(msgType, []byte(msg))
 }
 
-func logIfErr(err error) {
+func logIfErr(err error, who string) {
 	if err != nil {
-		log.Println("Error:", err)
+		log.Println(who+" Error:", err)
 	}
 }
