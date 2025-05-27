@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/xml"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"io"
+	"strconv"
 
 	"log"
 	"net/http"
@@ -14,8 +16,22 @@ import (
 	"time"
 )
 
-//TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
-// the <icon src="AllIcons.Actions.Execute"/> icon in the gutter and select the <b>Run</b> menu item from here.</p>
+const ApiUrl = "http://10.0.0.218:5000/api/text-to-speech?text=" // voice=en_US-lessac-high
+
+type Speak struct {
+	XMLName xml.Name `xml:"speak"`
+	Voice   Voice    `xml:"voice"`
+}
+
+type Voice struct {
+	Name    string  `xml:"name,attr"`
+	Prosody Prosody `xml:"prosody"`
+}
+
+type Prosody struct {
+	Rate string `xml:"rate,attr"`
+	Text string `xml:",chardata"`
+}
 
 // wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1
 // ${EDGE_SPEECH_URL}?ConnectionId=${connectId}&TrustedClientToken=${EDGE_API_TOKEN}`
@@ -58,28 +74,28 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		msgStr := string(msg)
+		var speak Speak
 		if strings.Contains(msgStr, "Path: speech.config") {
 			configReceived = true
-			log.Println("Received config")
 		} else if strings.Contains(msgStr, "Path: ssml") {
 			ssmlReceived = true
-			log.Println("Received SSML")
 
-			// Extract text from SSML (you may want to parse XML here; simplified example)
-			start := strings.Index(msgStr, "<prosody")
-			end := strings.Index(msgStr, "</prosody>")
-			if start != -1 && end != -1 && end > start {
-				text = msgStr[start:end]
-				// Simplify extraction to inside <prosody> ... </prosody>
-				text = strings.TrimSpace(text[strings.Index(text, ">")+1:])
-				log.Println("Extracted text to synth:", text)
+			// Extract text from SSML
+			err := xml.Unmarshal([]byte(msgStr), &speak)
+			if err != nil {
+				panic(err)
 			}
+			fmt.Println("Voice name:", speak.Voice.Name)
+			fmt.Println("Rate:", speak.Voice.Prosody.Rate)
+			text = strings.TrimSpace(speak.Voice.Prosody.Text)
+			fmt.Println("Text:", text)
 		}
-		print(msgStr)
-
+		// Print message
+		//print(msgStr)
+		//print(text)
 		if configReceived && ssmlReceived {
-			// Fetch wav
-			wavURL := "http://127.0.0.1:5000/api/text-to-speech?text=" + url.QueryEscape(text) + "&voice=en_US-ryan-high&speaker=en_US-ryan-high"
+			// TODO: Break out to configurable URL API
+			wavURL := ApiUrl + url.QueryEscape(text)
 			resp, err := http.Get(wavURL)
 			if err != nil {
 				log.Println("Error calling TTS API:", err)
@@ -93,13 +109,19 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Convert wav to mp3
-			mp3Data, err := wavToMP3(wavData)
+			rateF, err := strconv.ParseFloat(speak.Voice.Prosody.Rate, 32)
+			if err != nil {
+				log.Println("Error parsing rate:", err)
+				break
+			}
+
+			mp3Data, err := wavToMP3(wavData, rateF)
 			if err != nil {
 				log.Println("Error converting WAV to MP3:", err)
 				break
 			}
 
-			reqID := "some-random-or-extracted-request-id"
+			reqID := "some-random-or-extracted-request-id" // TODO: This doesn't really matter
 			sendTurnStart(ws, websocket.TextMessage, reqID)
 			sendAudio(ws, mp3Data, reqID)
 			sendTurnEnd(ws, websocket.TextMessage, reqID)
@@ -108,8 +130,13 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func wavToMP3(wavData []byte) ([]byte, error) {
-	// Write wav to temp file
+func wavToMP3(wavData []byte, speed float64) ([]byte, error) {
+	if speed < 0.5 {
+		speed = 0.5
+	} else if speed > 2.0 { // TODO: I think the scale goes up to 3.0, but my CPU can't keep up with that...
+		speed = 2.0
+	}
+	filter := fmt.Sprintf("atempo=%.2f", speed)
 	tmpWav, err := os.CreateTemp("", "input-*.wav")
 	if err != nil {
 		return nil, err
@@ -130,14 +157,13 @@ func wavToMP3(wavData []byte) ([]byte, error) {
 	defer os.Remove(tmpMP3.Name())
 	tmpMP3.Close()
 
-	// Run ffmpeg conversion
-	cmd := exec.Command("ffmpeg", "-y", "-i", tmpWav.Name(), "-codec:a", "libmp3lame", "-qscale:a", "2", tmpMP3.Name())
+	// Run ffmpeg conversion and set speed
+	cmd := exec.Command("ffmpeg", "-y", "-i", tmpWav.Name(), "-filter:a", filter, "-codec:a", "libmp3lame", "-qscale:a", "2", tmpMP3.Name())
 	err = cmd.Run()
 	if err != nil {
 		return nil, err
 	}
 
-	// Read MP3 bytes
 	mp3Data, err := os.ReadFile(tmpMP3.Name())
 	if err != nil {
 		return nil, err
@@ -154,7 +180,6 @@ func sendTurnStart(ws *websocket.Conn, msgType int, reqID string) error {
 }
 
 func sendAudio(ws *websocket.Conn, mp3data []byte, reqID string) error {
-	// Compose header string
 	header := fmt.Sprintf(
 		"Path: audio\r\nContent-Type: audio/mpeg\r\nX-RequestId: %s\r\nX-Timestamp: %s\r\n\r\n",
 		reqID, time.Now().Format(time.RFC1123))
