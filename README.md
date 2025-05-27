@@ -27,12 +27,16 @@ Add an entry to system's hosts file:
     
     127.0.0.1 speech.platform.bing.com
 
-### Host wyoming-piper tts (we connect to it's API on port 5000)
+### Host wyoming-piper tts (we connect to its API on port 5000)
     docker run -it --rm -v ${PWD}\model:/data -p 10200:10200 -p 5000:5000 rhasspy/wyoming-piper:latest --voice en_US-lessac-high
 
 Available voices: https://github.com/rhasspy/piper/blob/master/VOICES.md
 
 ## Running
+Runtime Requirements:
+    
+- ffmpeg
+
 
     go mod tidy
     go run .
