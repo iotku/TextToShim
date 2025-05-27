@@ -59,7 +59,9 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Println("Upgrade error:", err)
 		return
 	}
-	defer logIfErr(ws.Close())
+	defer func(ws *websocket.Conn) {
+		logIfErr(ws.Close())
+	}(ws)
 
 	fmt.Println("Client connected:", connId)
 
@@ -143,7 +145,9 @@ func wavToMP3(wavData []byte, speed float64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer logIfErr(os.Remove(tmpWav.Name()))
+	defer func(name string) {
+		logIfErr(os.Remove(name))
+	}(tmpWav.Name())
 
 	_, err = tmpWav.Write(wavData)
 	logIfErr(tmpWav.Close())
@@ -156,7 +160,9 @@ func wavToMP3(wavData []byte, speed float64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer logIfErr(os.Remove(tmpMP3.Name()))
+	defer func(name string) {
+		logIfErr(os.Remove(name))
+	}(tmpMP3.Name())
 	logIfErr(tmpMP3.Close())
 
 	// Run ffmpeg conversion and set speed
